@@ -3,14 +3,13 @@ const PORT = process.env.PORT || 7777;
 const wss = new WebSocket.Server({ port: PORT });
 
 const MAX = 4;
-const clients = new Map();  // ws -> { id, name, isHost }
+const clients = new Map();   // ws -> { id, name, isHost }
 const usedIDs = new Set();
 let gameStarted = false;
 
 console.log(`[Relay] Puerto ${PORT}`);
 
 wss.on('connection', ws => {
-    // Asigna ID mas bajo libre
     let id = -1;
     for (let i = 0; i < MAX; i++) {
         if (!usedIDs.has(i)) { id = i; break; }
@@ -26,7 +25,6 @@ wss.on('connection', ws => {
     usedIDs.add(id);
     console.log(`[+] P${id} connected | isHost=${isHost} | total=${clients.size}`);
 
-    // Informa al nuevo quien es
     ws.send(JSON.stringify({ type: 'welcome', id, isHost }));
     broadcastLobby();
 
@@ -37,10 +35,9 @@ wss.on('connection', ws => {
         const info = clients.get(ws);
         if (!info) return;
 
-        // Siempre inyecta el ID real del emisor
         msg.from = info.id;
 
-        if (msg.type !== 'input') // no loguear inputs (muy frecuentes)
+        if (msg.type !== 'input')
             console.log(`[>] ${msg.type} from P${info.id}`);
 
         switch (msg.type) {
@@ -56,23 +53,25 @@ wss.on('connection', ws => {
                 console.log('[!] Game started');
                 break;
 
-            // El host envia el estado del mundo a todos los clientes
             case 'worldState':
-                if (!info.isHost) break;  // solo el host puede enviar worldState
+                if (!info.isHost) break;
+                // FIX: El worldState lo reciben TODOS menos el host (el ya tiene los datos)
                 broadcastExcept(ws, msg);
                 break;
 
-            // Un cliente envia su input al host
             case 'input':
-                // Reenviar solo al host
-                sendToHost(msg, ws);
+                // FIX: Reenviar al host. Si el emisor ES el host, no tiene sentido
+                // (el host procesa sus propios inputs directamente en Update),
+                // pero tampoco hace dano ignorarlo.
+                if (!info.isHost) {
+                    sendToHost(msg);
+                }
                 break;
 
-            // Eventos puntuales: bichos, poderes, puntos
             case 'bugEvent':
             case 'scoreEvent':
             case 'powerEvent':
-                if (!info.isHost) break;  // solo el host emite eventos autoritativos
+                if (!info.isHost) break;
                 broadcastExcept(ws, msg);
                 break;
 
@@ -89,9 +88,14 @@ wss.on('connection', ws => {
         console.log(`[-] P${info?.id} left | total=${clients.size}`);
 
         if (info?.isHost && clients.size > 0) {
-            const [newWs, newInfo] = clients.entries().next().value;
-            newInfo.isHost = true;
-            newWs.send(JSON.stringify({ type: 'promotedToHost' }));
+            // FIX: Promover al siguiente cliente de forma segura
+            const nextEntry = clients.entries().next();
+            if (!nextEntry.done) {
+                const [newWs, newInfo] = nextEntry.value;
+                newInfo.isHost = true;
+                newWs.send(JSON.stringify({ type: 'promotedToHost' }));
+                console.log(`[!] P${newInfo.id} promovido a host`);
+            }
         }
 
         if (clients.size === 0) {
@@ -105,10 +109,13 @@ wss.on('connection', ws => {
     ws.on('error', e => console.error(`[!] P${clients.get(ws)?.id} error:`, e.message));
 });
 
-function sendToHost(msg, senderWs) {
+// FIX: sendToHost ya NO excluye ningun ws en particular —
+// simplemente busca quien tiene isHost=true
+function sendToHost(msg) {
+    const data = JSON.stringify(msg);
     for (const [ws, info] of clients) {
-        if (info.isHost && ws !== senderWs && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(msg));
+        if (info.isHost && ws.readyState === WebSocket.OPEN) {
+            ws.send(data);
             return;
         }
     }
@@ -127,6 +134,8 @@ function broadcastExcept(skip, obj) {
 }
 
 function broadcastLobby() {
-    const players = [...clients.values()].map(i => ({ id: i.id, name: i.name, isHost: i.isHost }));
+    const players = [...clients.values()].map(i => ({
+        id: i.id, name: i.name, isHost: i.isHost
+    }));
     broadcastAll({ type: 'lobby', players, gameStarted });
 }
