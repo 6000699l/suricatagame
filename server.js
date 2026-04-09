@@ -55,14 +55,12 @@ wss.on('connection', ws => {
 
             case 'worldState':
                 if (!info.isHost) break;
-                // FIX: El worldState lo reciben TODOS menos el host (el ya tiene los datos)
                 broadcastExcept(ws, msg);
                 break;
 
             case 'input':
-                // FIX: Reenviar al host. Si el emisor ES el host, no tiene sentido
-                // (el host procesa sus propios inputs directamente en Update),
-                // pero tampoco hace dano ignorarlo.
+                // CAMBIO: sendToHost ya no excluye al propio sender.
+                // Los clientes nunca son host, pero por seguridad no excluimos nada.
                 if (!info.isHost) {
                     sendToHost(msg);
                 }
@@ -88,7 +86,6 @@ wss.on('connection', ws => {
         console.log(`[-] P${info?.id} left | total=${clients.size}`);
 
         if (info?.isHost && clients.size > 0) {
-            // FIX: Promover al siguiente cliente de forma segura
             const nextEntry = clients.entries().next();
             if (!nextEntry.done) {
                 const [newWs, newInfo] = nextEntry.value;
@@ -109,8 +106,7 @@ wss.on('connection', ws => {
     ws.on('error', e => console.error(`[!] P${clients.get(ws)?.id} error:`, e.message));
 });
 
-// FIX: sendToHost ya NO excluye ningun ws en particular —
-// simplemente busca quien tiene isHost=true
+// CAMBIO: busca al host sin excluir ningun ws especifico
 function sendToHost(msg) {
     const data = JSON.stringify(msg);
     for (const [ws, info] of clients) {
