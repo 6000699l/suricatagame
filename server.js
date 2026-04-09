@@ -1,76 +1,72 @@
 const WebSocket = require('ws');
-
 const PORT = process.env.PORT || 7777;
 const wss  = new WebSocket.Server({ port: PORT });
 
-const clients  = new Map();   // ws -> { id, name, isHost }
-let   nextID   = 0;
-let   gameStarted = false;
+// Una sola sala global
+const room = {
+    clients:     new Map(),   // ws -> { id, name, isHost }
+    nextID:      0,
+    gameStarted: false,
+};
 
-console.log(`[Relay] Iniciado en puerto ${PORT}`);
+console.log(`[Relay] Puerto ${PORT}`);
 
 wss.on('connection', (ws) => {
-    const id     = nextID++;
-    const isHost = clients.size === 0;
-    clients.set(ws, { id, name: `Jugador${id + 1}`, isHost });
+    const id     = room.nextID++;
+    const isHost = room.clients.size === 0;
+    room.clients.set(ws, { id, name: `Jugador${id+1}`, isHost });
 
-    console.log(`[Relay] Conexion ID=${id} isHost=${isHost} | total=${clients.size}`);
+    console.log(`[+] P${id} conectado | isHost=${isHost} | sala=${room.clients.size}`);
 
-    // Informa al nuevo cliente su ID
-    send(ws, { type: 'assigned', id, isHost });
+    // 1. Dile al nuevo cliente quién es
+    send(ws, { type:'assigned', id, isHost });
 
-    // Informa a TODOS el estado de la sala
+    // 2. Dile a todos el estado actual de la sala
     broadcastLobby();
 
     ws.on('message', (raw) => {
         let msg;
         try { msg = JSON.parse(raw); }
-        catch (e) { console.error('[Relay] JSON invalido:', raw); return; }
+        catch { return; }
 
-        const sender = clients.get(ws);
-        if (!sender) return;
+        const info = room.clients.get(ws);
+        if (!info) return;
 
-        // Log de todos los mensajes para debug
+        // Inyecta el senderID real siempre — el cliente no puede falsificarlo
+        msg.senderID = info.id;
+
         if (msg.type !== 'playerState' && msg.type !== 'eagleState')
-            console.log(`[Relay] ${msg.type} de P${sender.id}`);
+            console.log(`[>] ${msg.type} de P${info.id}`);
 
         switch (msg.type) {
 
             case 'setName':
-                sender.name = msg.name || sender.name;
+                info.name = (msg.name || info.name).substring(0, 20);
                 broadcastLobby();
                 break;
 
             case 'startGame':
-                if (!sender.isHost) break;
-                gameStarted = true;
-                // Envia a TODOS incluyendo al host
-                broadcastAll({ type: 'startGame', timestamp: Date.now() });
-                console.log('[Relay] startGame broadcast a todos');
+                if (!info.isHost) break;
+                room.gameStarted = true;
+                // Envia a TODOS (incluyendo host) para sincronizar arranque
+                broadcastAll({ type:'startGame', timestamp: Date.now() });
+                console.log('[!] Partida iniciada');
                 break;
 
-            // Estado del jugador -> rebroadcast a TODOS los demas
+            // playerState: rebroadcast a TODOS menos al emisor
+            // El campo senderID ya fue inyectado arriba
             case 'playerState':
-                msg.senderID = sender.id;
                 broadcastExcept(ws, msg);
                 break;
 
-            // Eventos de juego -> rebroadcast a TODOS los demas
+            // Todos los eventos de juego: rebroadcast a los demás
             case 'bugPickedUp':
             case 'bugDelivered':
             case 'scoreUpdate':
             case 'eagleState':
+            case 'powerUsed':
             case 'hostClosed':
             case 'gameOver':
-                msg.senderID = sender.id;
-                broadcastExcept(ws, msg);
-                break;
-
-            // Escorpion -> solo al jugador objetivo, NO al que lo lanzo
-            case 'powerUsed':
-                msg.senderID = sender.id;
-                // El relay rebroadcast a todos menos al emisor
-                // El cliente ignora los poderes con senderID == su propio ID
                 broadcastExcept(ws, msg);
                 break;
 
@@ -80,23 +76,20 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        const info = clients.get(ws);
-        clients.delete(ws);
-        console.log(`[Relay] P${info?.id} desconectado | quedan=${clients.size}`);
+        const info = room.clients.get(ws);
+        room.clients.delete(ws);
+        console.log(`[-] P${info?.id} desconectado | sala=${room.clients.size}`);
 
-        // Si el host se fue, promueve al siguiente
-        if (info?.isHost && clients.size > 0) {
-            const [newWs, newInfo] = clients.entries().next().value;
+        if (info?.isHost && room.clients.size > 0) {
+            const [newWs, newInfo] = room.clients.entries().next().value;
             newInfo.isHost = true;
-            send(newWs, { type: 'promotedToHost' });
-            console.log(`[Relay] P${newInfo.id} promovido a host`);
+            send(newWs, { type:'promotedToHost' });
+            console.log(`[!] P${newInfo.id} ahora es host`);
         }
         broadcastLobby();
     });
 
-    ws.on('error', (err) => {
-        console.error(`[Relay] Error P${clients.get(ws)?.id}:`, err.message);
-    });
+    ws.on('error', (e) => console.error(`[!] Error P${room.clients.get(ws)?.id}:`, e.message));
 });
 
 function send(ws, obj) {
@@ -105,21 +98,20 @@ function send(ws, obj) {
 }
 
 function broadcastAll(obj) {
-    const data = JSON.stringify(obj);
-    for (const ws of clients.keys())
-        if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    const d = JSON.stringify(obj);
+    for (const ws of room.clients.keys())
+        if (ws.readyState === WebSocket.OPEN) ws.send(d);
 }
 
-function broadcastExcept(excludeWs, obj) {
-    const data = JSON.stringify(obj);
-    for (const ws of clients.keys())
-        if (ws !== excludeWs && ws.readyState === WebSocket.OPEN)
-            ws.send(data);
+function broadcastExcept(skip, obj) {
+    const d = JSON.stringify(obj);
+    for (const ws of room.clients.keys())
+        if (ws !== skip && ws.readyState === WebSocket.OPEN) ws.send(d);
 }
 
 function broadcastLobby() {
     const players = [];
-    for (const [, info] of clients)
-        players.push({ id: info.id, name: info.name, isHost: info.isHost });
-    broadcastAll({ type: 'lobbyState', players, gameStarted });
+    for (const [, i] of room.clients)
+        players.push({ id:i.id, name:i.name, isHost:i.isHost });
+    broadcastAll({ type:'lobbyState', players, gameStarted: room.gameStarted });
 }
